@@ -102,7 +102,7 @@ SOFTWARE.
           // Example of using time for calculations (notice periodic flashing of entire scene into and out of red)
           let r: f32 = (sin(t/50) + 1)/2;
           // keep 0.3 as a floor for green so it always stands out a bit against the background
-          let g: f32 = (sin(vi * 0.1) + 1)/6 + 0.3;
+          let g: f32 = (sin(vi * 0.1) + 1)/3 + 0.3;
           // Example of using position for calculations - notice constant periodic blue vertical stripes in the output
           let b: f32 = (sin(vertexPos.x * 50) + 1)/2;
           output.vColor = vec3<f32>(r, g, b); 
