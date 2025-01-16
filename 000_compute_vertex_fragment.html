@@ -16,6 +16,11 @@
     <canvas id="webgpu-canvas" style="margin: auto; width: 75vw; height: 75vh;"></canvas>
   </div>
   <script type="module">
+    
+    const WORKGROUP_SIZE = 64
+    /* 200 particles per workgroup - limited by hardware power but not much else */
+    const PARTICLE_COUNT = WORKGROUP_SIZE * 200;
+
     const adapter = await navigator.gpu.requestAdapter();
     const device = await adapter.requestDevice();
 
@@ -37,17 +42,18 @@
         };
         @group(0) @binding(0) var<uniform> t: f32;
         @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
-        @compute @workgroup_size(64)
+
+        @compute @workgroup_size(${WORKGROUP_SIZE})
         fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
           let index = global_id.x;
           if (index >= arrayLength(&particles)) {
             return;
           }
           let fi = f32(index);    
-          // Simple update: move particles in a circular motion
+
           particles[index].position = vec2<f32>(
-            cos(f32(index) * 0.1 + f32(global_id.y) * 0.01) * 0.8 + sin((t + fi)/100)/10,
-            sin(f32(index) * 0.1 + f32(global_id.y) * 0.01) * 0.8 + cos((t + fi)/100)/10
+            cos(fi * 0.11) * 0.8 + sin((t + fi)/100)/10,
+            sin(fi * 0.11) * 0.8 + cos((t + fi)/100)/10
           );
         }
       `
@@ -61,16 +67,23 @@
         };
         
         @group(0) @binding(0) var<uniform> t: f32;
-        @group(0) @binding(2) var<storage> particles : array<vec2<f32>>;
+        @group(0) @binding(2) var<storage, read> particles : array<vec2<f32>>;
 
         @vertex
-        fn main(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
+        fn main(@builtin(vertex_index) vertexIndex : u32) -> VertexOutput {
           var output : VertexOutput;
-          output.Position = vec4<f32>(particles[VertexIndex], 0.0, 1.0);
+          let vertexPos = particles[vertexIndex];
+          output.Position = vec4<f32>(vertexPos, 0.0, 1.0);
 
-          let z: f32 = (sin(t/50) + 1)/2;
-          let p: f32 = (cos(t/50) + 1)/2;
-          output.vColor = vec3<f32>(z, p, 1.0); 
+          // Example of using vertex index for calculations
+          let vi = f32(vertexIndex);
+          // Example of using time for calculations (notice periodic flashing of entire scene into and out of red)
+          let r: f32 = (sin(t/50) + 1)/2;
+          // keep 0.3 as a floor for green so it always stands out a bit against the background
+          let g: f32 = (sin(vi * 0.1) + 1)/6 + 0.3;
+          // Example of using position for calculations - notice constant periodic blue vertical stripes in the output
+          let b: f32 = (sin(vertexPos.x * 50) + 1)/2;
+          output.vColor = vec3<f32>(r, g, b); 
           return output;
         }
       `
@@ -118,8 +131,7 @@
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     })
     // Storage for particle data
-    const particleCount = 10000;
-    const particleBufferSize = Float32Array.BYTES_PER_ELEMENT * 2 * particleCount;
+    const particleBufferSize = Float32Array.BYTES_PER_ELEMENT * 2 * PARTICLE_COUNT;
     const particleBuffer = device.createBuffer({
       size: particleBufferSize,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
@@ -169,7 +181,7 @@
       const computePass = computePassEncoder.beginComputePass();
       computePass.setPipeline(computePipeline);
       computePass.setBindGroup(0, computeBindGroup);
-      computePass.dispatchWorkgroups(Math.ceil(particleCount / 64));
+      computePass.dispatchWorkgroups(Math.ceil(PARTICLE_COUNT / WORKGROUP_SIZE));
       computePass.end();
       device.queue.submit([computePassEncoder.finish()]);
 
@@ -185,7 +197,7 @@
       });
       passEncoder.setPipeline(pipeline);
       passEncoder.setBindGroup(0, renderBindGroup);
-      passEncoder.draw(particleCount);
+      passEncoder.draw(PARTICLE_COUNT);
       passEncoder.end();
       device.queue.submit([commandEncoder.finish()]);
 
