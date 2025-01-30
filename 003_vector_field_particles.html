@@ -1,0 +1,600 @@
+<!-- 
+Copyright (C) 2024-2025 Aleksei Chernikov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. 
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGPU Compute/Vertex/Fragment Demo</title>
+  <style>
+    body {
+      padding: 0px;
+      margin: 0px;
+    }
+  </style>
+</head>
+<body>
+  <div style="width: 100%; display: flex; flex-direction: row; justify-items: center; margin-top: 5vh;">
+    <canvas id="webgpu-canvas" style="margin: auto; width: 75vw; height: 75vh;"></canvas>
+  </div>
+  <script type="module">
+    const WORKGROUP_SIZE = 64
+    const PARTICLE_COUNT = 5000
+    const N_TRIANGLES_PER_CIRCLE = 8
+    const RADIUS = 3
+    const FIELD_WIDTH = 60
+    const FIELD_HEIGHT = 60
+    const CELL_COUNT = FIELD_WIDTH * FIELD_HEIGHT
+    const MAX_SPEED = 0.003
+    const UPDATE_TIMESTEP = 0.01
+    const FIELD_MAGNITUDE = 2;
+
+    const PARTICLE_STRUCT_SIZE = 6
+    const FIELD_STRUCT_SIZE = 4
+
+
+    const adapter = await navigator.gpu.requestAdapter();
+    const device = await adapter.requestDevice();
+
+    const canvas = document.getElementById('webgpu-canvas');
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+    const context = canvas.getContext('webgpu');
+    const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+    context.configure({
+      device: device,
+      format: presentationFormat,
+    });
+
+    const fieldComputeShaderModule = device.createShaderModule({
+      code: `
+        struct Cell {
+          angle: f32,
+          magnitude: f32
+        };
+
+        @group(0) @binding(0) var<uniform> t: f32;
+        @group(0) @binding(1) var<storage, read_write> field : array<Cell>;
+
+        const TICKS_PER_CYCLE: u32 = 100;
+
+        @compute @workgroup_size(${WORKGROUP_SIZE})
+        fn cs(@builtin(global_invocation_id) global_id : vec3<u32>) {
+          let index = global_id.x;
+          if (index >= arrayLength(&field)) {
+              return;
+          }
+          let fi = f32(index);
+          let gx: u32 = index % ${FIELD_WIDTH};
+          let gy: u32 = index / ${FIELD_WIDTH};
+          let gfx: f32 = 2 * f32(gx)/${FIELD_WIDTH} - 1;
+          let gfy: f32 = 2 * f32(gy)/${FIELD_HEIGHT} - 1;
+          
+          let dx = gfx;
+          let dy = gfy;
+          let dist = sqrt(dx * dx + dy * dy);
+          var c: Cell;
+          var z = t;
+
+          c.magnitude = ${FIELD_MAGNITUDE};
+          // c.angle = cos( dx * 10 + dy * 10 + dist) * 6.28 + t/100; 
+          // c.angle = atan2(-gfx, gfy) - 3.14/2; c.magnitude = 0.05;
+          // c.angle = 3.14 - atan2(gfy, gfx) + t/150;
+          // c.angle = atan2(-gfy, -gfx) + t/100;
+          // c.angle = atan2(-gfy, gfx) + t/100;
+          // c.angle = 3.14 - atan2(gfx, gfy);
+          // c.angle = atan2(cos(gfx * 30), 0.25 * sin(gfy * 8) + 0.5 * sin(gfy * 4));
+          c.angle = (1 - dist) * 3.14 * 2 + 0.00001 * t;
+          // c.angle = (1 - dist) * 3.14 * 20 + 0.00001 * t;
+          // c.angle = (1 - dist) * 3.14 * 20 + 0.01 * t;
+          // c.angle = (1 - dist) * 3.14 * 20 + 0.2 * t;
+          // c.angle = (1 - dist) * 3.14 * 20 + 0.7 * t;
+          
+          field[index] = c;
+        }
+      `
+    });
+
+    const particleComputeShaderModule = device.createShaderModule({
+      code: `
+        struct Particle {
+          position: vec2<f32>,
+          v: vec2<f32>,
+          a: vec2<f32>,
+        };
+        struct Cell {
+          angle: f32,
+          magnitude: f32
+        };
+
+        @group(0) @binding(0) var<uniform> t: f32;
+        @group(0) @binding(1) var<storage, read_write> field : array<Cell>;
+        @group(0) @binding(2) var<storage, read_write> particles : array<Particle>;
+
+        const dt: f32 = ${UPDATE_TIMESTEP};
+        const maxSpeed: f32 = ${MAX_SPEED};
+
+        fn len(v: vec2f) -> f32 {
+          return sqrt(v.x * v.x + v.y * v.y);
+        }
+
+        @compute @workgroup_size(${WORKGROUP_SIZE})
+        fn cs(@builtin(global_invocation_id) global_id : vec3<u32>) {
+            let index = global_id.x;
+            if (index >= arrayLength(&particles)) {
+                return;
+            }
+            let p = particles[index];
+            let pi = f32(index);
+
+            let zz = t;
+            let x0 = cos(pi);
+            let y0 = sin(pi);
+            let pgx = u32((p.position.x + 1) * ${FIELD_WIDTH} /2);
+            let pgy = u32((p.position.y + 1)* ${FIELD_HEIGHT} /2);
+
+            let fieldIndex: u32 = pgy * ${FIELD_WIDTH} + pgx;
+            let cell = field[fieldIndex];
+            let fx = cos(cell.angle) * cell.magnitude;
+            let fy = sin(cell.angle) * cell.magnitude;
+            let dv = vec2f(fx * dt, fy * dt);
+            var newV = particles[index].v + dv * dt;
+            let candidateLength = len(newV);
+            if(len(newV) > maxSpeed) {
+              newV *= maxSpeed/candidateLength;
+            }
+          
+            var newPos = particles[index].position + newV;
+
+            if(newPos.x > 1) {
+              newPos.x = -1;
+            }
+            if(newPos.y > 1) {
+              newPos.y = -1;
+            }
+            if(newPos.x < -1) {
+              newPos.x = 1;
+            }
+            if(newPos.y < -1) {
+              newPos.y = 1;
+            }
+
+
+            // if(newPos.x > 1) {
+            //   newPos.x = 1;
+            //   newV.x = -newV.x;
+            // }
+            // if(newPos.y > 1) {
+            //   newPos.y = 1;
+            //   newV.y = -newV.y;
+            // }
+            // if(newPos.x < -1) {
+            //   newPos.x = -1;
+            //   newV.x = -newV.x;
+            // }
+            // if(newPos.y < -1) {
+            //   newPos.y = -1;
+            //   newV.y = -newV.y;
+            // }
+            particles[index].v = newV;
+            particles[index].position = newPos;
+        }
+      `
+    });
+
+    const particleVertexShaderModule = device.createShaderModule({
+      code: `
+        struct VertexOutput {
+            @builtin(position) position : vec4<f32>,
+            @location(0) vColor : vec3<f32>,
+            @location(1) center: vec2<f32>,
+            @location(2) sidePos: vec4<f32>
+        };
+        struct Particle {
+            position: vec2<f32>,
+            v: vec2<f32>,
+            a: vec2<f32>,
+        };
+
+        @group(0) @binding(0) var<uniform> t: f32;
+        @group(0) @binding(4) var<uniform> viewport : vec2f;
+        @group(0) @binding(5) var<storage> particles : array<Particle>;
+
+        const TAU: f32 = 6.28;
+        const N_TRIANGLES_PER_CIRCLE = ${N_TRIANGLES_PER_CIRCLE};
+        const TRIANGLE_VERTEX_MULTIPLIER: u32 = 3 * N_TRIANGLES_PER_CIRCLE;
+        const RADIUS: f32 = ${RADIUS};
+
+        @vertex
+        fn vs(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
+            var output : VertexOutput;
+
+            let triangleIndex: u32 = (VertexIndex % TRIANGLE_VERTEX_MULTIPLIER)/3;
+            let particleIndex: u32 = VertexIndex / TRIANGLE_VERTEX_MULTIPLIER;
+            let triangleVertexIndex = VertexIndex % 3;
+
+            let xy: vec2f = particles[particleIndex].position;
+            let fi: f32 = f32(VertexIndex);
+            let pi: f32 = f32(particleIndex);
+            // let r: f32 = (cos(t/30 + pi * 0.1 + xy.x * 4)+ 1)/2;
+            // let g: f32 = (cos(t/57 + pi * 0.2 + xy.y) + 1)/2;
+            // let b: f32 = (cos(t/24 + pi * 0.4 + xy.x * 24) + 1)/2;
+            let ni: f32 = fi/f32(arrayLength(&particles));
+            let r: f32 = (cos(2 * xy.x * TAU + ni) + 1)/2 * 0.8 + 0.1;
+            let g: f32 = (sin((8 * xy.x + 0.5 * xy.y * TAU + xy.y)/2) + 1)/2 * 0.8 + 0.05;
+            let b: f32 = (cos(2 * TAU * xy.x * xy.y/2 - ni) + 1)/2 * 0.8 + 0.1;
+            output.vColor = vec3<f32>(r, g, b); 
+            output.center = xy;
+            output.sidePos = vec4f(xy, 0.0, 1.0);
+
+            if(triangleVertexIndex == 0) {
+              output.position = vec4<f32>(xy, 0.0, 1.0);
+              return output;
+            }
+            
+            let anglePerTriangle = TAU / N_TRIANGLES_PER_CIRCLE;
+            let angle: f32 = f32(triangleIndex + triangleVertexIndex) * anglePerTriangle;
+            let rx = RADIUS/viewport.x;
+            let ry = RADIUS/viewport.y;
+            let s = sin(t/100 + fi * 0.01);
+            let sfi = (sin(pi) + 1)/8;
+            let dxy: vec2f = vec2f(
+                cos(angle) * rx,
+                sin(angle) * ry
+            );
+
+            output.position = vec4<f32>(xy + dxy, 0.0, 1.0);
+
+            return output;
+        }
+      `
+    });
+
+    const particleFragmentShaderModule = device.createShaderModule({
+      code: `
+        struct VertexOutput {
+            @builtin(position) position : vec4<f32>,
+            @location(0) vColor : vec3<f32>,
+            @location(1) center: vec2<f32>,
+            @location(2) sidePos: vec4<f32>
+        };
+
+        @fragment
+        fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
+            return vec4<f32>(in.vColor, 1.0);
+        }
+      `
+    });
+
+
+    const fieldVertexShaderModule = device.createShaderModule({
+      code: `
+        struct VertexOutput {
+            @builtin(position) position : vec4<f32>,
+            @location(0) vColor : vec3<f32>,
+        };
+        struct Cell {
+          angle: f32,
+          magnitude: f32
+        };
+
+        @group(0) @binding(3) var<storage> field : array<Cell>;
+
+        const TAU: f32 = 6.28;
+
+        const cellW: f32 = 1.0/${FIELD_WIDTH};
+        const cellH: f32 = 1.0/${FIELD_HEIGHT};
+        const baseL: f32 = min(cellW, cellH)/8;
+
+        @vertex
+        fn vs(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
+            var output : VertexOutput;
+
+            let fieldIndex: u32 = VertexIndex / 3;
+            var gx: u32 = fieldIndex % ${FIELD_WIDTH};
+            var gy: u32 = fieldIndex / ${FIELD_WIDTH};
+            var gpx: f32 = f32(gx)/${FIELD_WIDTH} + cellW/2;
+            var gpy: f32 = f32(gy)/${FIELD_HEIGHT} + cellH/2;
+            let xy: vec2f = vec2f(gpx - 0.5, gpy - 0.5) * 2;
+
+            let triangleIndex: u32 = VertexIndex % 3;
+
+            let cell: Cell = field[fieldIndex];
+            let cellAngle: f32 = cell.angle;
+
+            if(triangleIndex == 2) {
+              let pointInDirectionOfField = vec2f(
+                cellW * cos(cellAngle),
+                cellH * sin(cellAngle)
+              );
+              output.vColor = vec3f(1, 1, 1);
+              output.position = vec4<f32>(xy + pointInDirectionOfField, 0.0, 1.0);
+              return output;
+            }
+
+            let vi: f32 = f32(VertexIndex);
+            let ti: f32 = f32(triangleIndex);
+            let d = f32(triangleIndex % 2);
+            output.vColor = vec3f(0.1, 0.01, 0.1);
+            
+            // it's either 0 or 1; (0 - 0.5) * 2 = -1; (1 - 0.5) * 2 = 1
+            let direction: f32 = -(ti - 0.5) * 2;
+            let anglePerTriangle = TAU / 4;
+            let angle = ti * anglePerTriangle + (TAU/4 - cellAngle);
+            let baseAngle = TAU/4 - cellAngle;
+            var dxy: vec2f;
+            if(d == 0) {
+              dxy.x = baseL * cos(baseAngle);
+              dxy.y = -baseL * sin(baseAngle);
+            } else {
+              dxy.x = -baseL * cos(baseAngle);
+              dxy.y = baseL * sin(baseAngle);
+            }
+            output.position = vec4<f32>(xy + dxy, 0.0, 1.0);
+
+            return output;
+        }
+      `
+    });
+
+    const fieldFragmentShaderModule = device.createShaderModule({
+      code: `
+        struct VertexOutput {
+            @builtin(position) position : vec4<f32>,
+            @location(0) vColor : vec3<f32>,
+        };
+
+        @fragment
+        fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
+            return vec4<f32>(in.vColor, 1.0);
+        }
+      `
+    });
+
+    const fieldComputePipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: {
+        module: fieldComputeShaderModule,
+        entryPoint: 'cs',
+      }
+    });
+    const particleComputePipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: {
+        module: particleComputeShaderModule,
+        entryPoint: 'cs',
+      }
+    });
+
+    const particleRenderPipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: {
+        module: particleVertexShaderModule,
+        entryPoint: 'vs',
+      },
+      fragment: {
+        module: particleFragmentShaderModule,
+        entryPoint: 'fs',
+        targets: [{ format: presentationFormat }]
+      },
+      primitive: {
+        topology: 'triangle-list'
+      }
+    });
+    const fieldRenderPipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: {
+        module: fieldVertexShaderModule,
+        entryPoint: 'vs',
+      },
+      fragment: {
+        module: fieldFragmentShaderModule,
+        entryPoint: 'fs',
+        targets: [{ format: presentationFormat }]
+      },
+      primitive: {
+        topology: 'triangle-list'
+      }
+    });
+
+    const vertexBufferSize = PARTICLE_COUNT * 3 * N_TRIANGLES_PER_CIRCLE
+    const cellCount = FIELD_WIDTH * FIELD_HEIGHT;
+    const fieldArrowVertexCount = cellCount * 3;
+
+    const timeJs = new Float32Array(1)
+    const timeBuffer = device.createBuffer({
+      size: Float32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    })
+    const viewportJs = new Float32Array(2)
+    const viewportBuffer = device.createBuffer({
+      size: Float32Array.BYTES_PER_ELEMENT * 2,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    })
+
+    const jsFieldBuffer = new Float32Array(cellCount * FIELD_STRUCT_SIZE)
+    const fieldBufferSize = Float32Array.BYTES_PER_ELEMENT * jsFieldBuffer.length;
+    const fieldBuffer = device.createBuffer({
+      size: fieldBufferSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+    const jsParticleBuffer = new Float32Array(PARTICLE_COUNT * PARTICLE_STRUCT_SIZE)
+    const particleBufferSize = Float32Array.BYTES_PER_ELEMENT * jsParticleBuffer.length;
+    const particleBuffer = device.createBuffer({
+      size: particleBufferSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+
+
+
+    const fieldComputeBindGroup = device.createBindGroup({
+      layout: fieldComputePipeline.getBindGroupLayout(0),
+      entries: [{
+        binding: 0,
+        resource: {
+          buffer: timeBuffer
+        }
+      }, {
+        binding: 1,
+        resource: {
+          buffer: fieldBuffer
+        }
+      }]
+    });
+    const particleComputeBindGroup = device.createBindGroup({
+      layout: particleComputePipeline.getBindGroupLayout(0),
+      entries: [{
+        binding: 0,
+        resource: {
+          buffer: timeBuffer
+        }
+      }, {
+        binding: 1,
+        resource: {
+          buffer: fieldBuffer
+        }
+      }, {
+        binding: 2,
+        resource: {
+          buffer: particleBuffer
+        }
+      }]
+    });
+
+
+    const particleRenderBindGroup = device.createBindGroup({
+      layout: particleRenderPipeline.getBindGroupLayout(0),
+      entries: [{
+        binding: 0,
+        resource: {
+          buffer: timeBuffer
+        }
+      },
+      {
+        binding: 4,
+        resource: {
+          buffer: viewportBuffer
+        }
+      }, {
+        binding: 5,
+        resource: {
+          buffer: particleBuffer
+        }
+      }]
+    });
+    const fieldRenderBindGroup = device.createBindGroup({
+      layout: fieldRenderPipeline.getBindGroupLayout(0),
+      entries: [{
+        binding: 3,
+        resource: {
+          buffer: fieldBuffer
+        }
+      }]
+    });
+
+
+
+    const particleStart = new Array(PARTICLE_COUNT * PARTICLE_STRUCT_SIZE)
+    for(let i = 0; i < PARTICLE_COUNT * PARTICLE_STRUCT_SIZE; i += PARTICLE_STRUCT_SIZE) {
+      // // x
+      // particleStart[i] = (Math.cos(i) + Math.random() * 2)
+      // // y
+      // particleStart[i + 1] = (Math.sin(i) + Math.random() * 2)
+      // x
+      particleStart[i] = Math.random() * 2 - 1
+      // y
+      particleStart[i + 1] = Math.random() * 2 - 1
+      // vx
+      particleStart[i + 2] = 0
+      // vy
+      particleStart[i + 3] = 0
+      // ax
+      particleStart[i + 4] = 0
+      // ay
+      particleStart[i + 5] = 0
+    }
+    jsParticleBuffer.set(particleStart, 0)
+    device.queue.writeBuffer(particleBuffer, 0, jsParticleBuffer)
+
+    let t = 0
+    function frame() {
+      t += 1
+      timeJs.set([t], 0)
+      viewportJs.set([canvas.width, canvas.height], 0)
+      device.queue.writeBuffer(timeBuffer, 0, timeJs);
+      device.queue.writeBuffer(viewportBuffer, 0, viewportJs);
+
+      const fieldComputePassEncoder = device.createCommandEncoder();
+      const fieldComputePass = fieldComputePassEncoder.beginComputePass();
+      fieldComputePass.setPipeline(fieldComputePipeline);
+      fieldComputePass.setBindGroup(0, fieldComputeBindGroup);
+      fieldComputePass.dispatchWorkgroups(Math.ceil(CELL_COUNT/WORKGROUP_SIZE));
+      fieldComputePass.end();
+      device.queue.submit([fieldComputePassEncoder.finish()]);
+      
+      const particleComputePassEncoder = device.createCommandEncoder();
+      const particleComputePass = particleComputePassEncoder.beginComputePass();
+      particleComputePass.setPipeline(particleComputePipeline);
+      particleComputePass.setBindGroup(0, particleComputeBindGroup);
+      particleComputePass.dispatchWorkgroups(Math.ceil(PARTICLE_COUNT / WORKGROUP_SIZE));
+      particleComputePass.end();
+      device.queue.submit([particleComputePassEncoder.finish()]);
+
+
+      const fieldRenderEncoder = device.createCommandEncoder();
+      const fieldPassEncoder = fieldRenderEncoder.beginRenderPass({
+        colorAttachments: [{
+          view: context.getCurrentTexture().createView(),
+          clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+          loadOp: 'clear',
+          storeOp: 'store',
+        }]
+      });
+      fieldPassEncoder.setPipeline(fieldRenderPipeline);
+      fieldPassEncoder.setBindGroup(0, fieldRenderBindGroup);
+      fieldPassEncoder.draw(fieldArrowVertexCount);
+      fieldPassEncoder.end();
+      device.queue.submit([fieldRenderEncoder.finish()]);
+
+
+      const particleRenderEncoder = device.createCommandEncoder();
+      const particlePassEncoder = particleRenderEncoder.beginRenderPass({
+        colorAttachments: [{
+          view: context.getCurrentTexture().createView(),
+          clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+          loadOp: 'load',
+          storeOp: 'store',
+        }]
+      });
+      particlePassEncoder.setPipeline(particleRenderPipeline);
+      particlePassEncoder.setBindGroup(0, particleRenderBindGroup);
+      particlePassEncoder.draw(PARTICLE_COUNT * 3 * N_TRIANGLES_PER_CIRCLE);
+      particlePassEncoder.end();
+      device.queue.submit([particleRenderEncoder.finish()]);
+
+      requestAnimationFrame(frame);
+    }
+    frame();
+  </script>
+</body>
+</html>
