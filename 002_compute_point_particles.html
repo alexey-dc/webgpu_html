@@ -1,0 +1,293 @@
+<!-- 
+Copyright (C) 2024-2025 Aleksei Chernikov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. 
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGPU Compute/Vertex/Fragment Demo</title>
+  <style>
+    body {
+      padding: 0px;
+      margin: 0px;
+    }
+  </style>
+</head>
+<body>
+  <div style="width: 100%; display: flex; flex-direction: row; justify-items: center; margin-top: 5vh;">
+    <canvas id="webgpu-canvas" style="margin: auto; width: 75vw; height: 75vh;"></canvas>
+  </div>
+  <script type="module">
+    
+    const WORKGROUP_SIZE = 64
+    /* 200 particles per workgroup - limited by hardware power but not much else */
+    const PARTICLE_COUNT = WORKGROUP_SIZE * 200;
+    const N_TRIANGLES_PER_CIRCLE = 16
+    const RADIUS = 6
+
+    const adapter = await navigator.gpu.requestAdapter();
+    const device = await adapter.requestDevice();
+
+    const canvas = document.getElementById('webgpu-canvas');
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+    const context = canvas.getContext('webgpu');
+    const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+    context.configure({
+      device: device,
+      format: presentationFormat,
+    });
+
+    // Define compute shader for particle positions
+    const computeShaderModule = device.createShaderModule({
+      code: `
+        struct Particle {
+            position: vec2<f32>,
+            v: vec2<f32>,
+            a: vec2<f32>,
+        };
+
+        @group(0) @binding(0) var<uniform> t: f32;
+        @group(0) @binding(1) var<storage, read_write> particles : array<Particle>;
+
+        @compute @workgroup_size(${WORKGROUP_SIZE})
+        fn cs(@builtin(global_invocation_id) global_id : vec3<u32>) {
+            let index = global_id.x;
+            if (index >= arrayLength(&particles)) {
+                return;
+            }
+            let fi = f32(index);
+            
+            // Simple update: move particles in a circular motion
+            particles[index].position = vec2<f32>(
+                cos(fi * 3) * 0.75 + sin(t /1000 + fi * 0.2) * 0.2,
+                sin(fi * fi * 0.03 + fi * 1.1) * 0.8 + cos((t + fi * 0.4)/200)/10
+            );
+        }
+      `
+    });
+
+    const vertexShaderModule = device.createShaderModule({
+      code: `
+        struct VertexOutput {
+            @builtin(position) position : vec4<f32>,
+            @location(0) vColor : vec3<f32>,
+            @location(1) center: vec2<f32>,
+            @location(2) sidePos: vec4<f32>
+        };
+        struct Particle {
+            position: vec2<f32>,
+            v: vec2<f32>,
+            a: vec2<f32>,
+        };
+
+        @group(0) @binding(0) var<uniform> t: f32;
+        @group(0) @binding(2) var<storage> particles : array<Particle>;
+        @group(0) @binding(3) var<uniform> viewport : vec2f;
+
+        const TAU: f32 = 6.28;
+        const N_TRIANGLES_PER_CIRCLE = ${N_TRIANGLES_PER_CIRCLE};
+        const TRIANGLE_VERTEX_MULTIPLIER: u32 = 3 * N_TRIANGLES_PER_CIRCLE;
+        const RADIUS: f32 = ${RADIUS};
+
+        @vertex
+        fn vs(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
+            var output : VertexOutput;
+
+            let triangleIndex: u32 = (VertexIndex % TRIANGLE_VERTEX_MULTIPLIER)/3;
+            let particleIndex: u32 = VertexIndex / TRIANGLE_VERTEX_MULTIPLIER;
+            let triangleVertexIndex = VertexIndex % 3;
+
+            let xy: vec2f = particles[particleIndex].position;
+            let fi: f32 = f32(VertexIndex);
+            let pi: f32 = f32(particleIndex);
+            let r: f32 = (cos(t/30 + pi * 0.1 + xy.x * 4)+ 1)/2;
+            let g: f32 = (cos(t/57 + pi * 0.2 + xy.y * xy.x * t/100) + 1)/2;
+            let b: f32 = (cos(t/24 + pi * 0.4 + xy.x * 24) + 1)/2;
+            output.vColor = vec3<f32>(r, g, b); 
+            output.center = xy;
+            output.sidePos = vec4f(xy, 0.0, 1.0);
+
+            if(triangleVertexIndex == 0) {
+              output.position = vec4<f32>(xy, 0.0, 1.0);
+              return output;
+            }
+            
+            let anglePerTriangle = TAU / N_TRIANGLES_PER_CIRCLE;
+            let angle: f32 = f32(triangleIndex + triangleVertexIndex) * anglePerTriangle;
+            let rx = RADIUS/viewport.x;
+            let ry = RADIUS/viewport.y;
+            let s = sin(t/100 + fi * 0.01);
+            let sfi = (sin(pi) + 1)/8;
+            let dxy: vec2f = vec2f(
+                cos(angle) * rx * (s + sfi) * s,
+                sin(angle) * ry * (s + sfi * sfi)
+            );
+
+            output.position = vec4<f32>(xy + dxy, 0.0, 1.0);
+
+            return output;
+        }
+      `
+    });
+
+    const fragmentShaderModule = device.createShaderModule({
+      code: `
+        struct VertexOutput {
+            @builtin(position) position : vec4<f32>,
+            @location(0) vColor : vec3<f32>,
+            @location(1) center: vec2<f32>,
+            @location(2) sidePos: vec4<f32>
+        };
+
+          // @group(0) @binding(3) var<uniform> viewport : vec2f;
+          @fragment
+          fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
+              return vec4<f32>(in.vColor, 1.0);
+          }
+      `
+    });
+
+    // Create compute pipeline
+    const computePipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: {
+        module: computeShaderModule,
+        entryPoint: 'cs',
+      }
+    });
+
+    // Create render pipeline
+    const pipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: {
+        module: vertexShaderModule,
+        entryPoint: 'vs',
+      },
+      fragment: {
+        module: fragmentShaderModule,
+        entryPoint: 'fs',
+        targets: [{ format: presentationFormat }]
+      },
+      primitive: {
+        topology: 'triangle-list'
+      }
+    });
+
+    const vertexBufferSize = PARTICLE_COUNT * 3 * N_TRIANGLES_PER_CIRCLE
+
+    const timeJs = new Float32Array(1)
+    const timeBuffer = device.createBuffer({
+      size: Float32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    })
+    // Storage for particle data
+    const particleBufferSize = Float32Array.BYTES_PER_ELEMENT * vertexBufferSize;
+    const particleBuffer = device.createBuffer({
+      size: particleBufferSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+    const viewportJs = new Float32Array(2)
+    const viewportBuffer = device.createBuffer({
+      size: Float32Array.BYTES_PER_ELEMENT * 2,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    })
+
+    // Bind group for compute shader
+    const computeBindGroup = device.createBindGroup({
+      layout: computePipeline.getBindGroupLayout(0),
+      entries: [{
+        binding: 0,
+        resource: {
+          buffer: timeBuffer
+        }
+      }, {
+        binding: 1,
+        resource: {
+          buffer: particleBuffer
+        }
+      }]
+    });
+
+    // Bind group for vertex shader
+    const renderBindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{
+        binding: 0,
+        resource: {
+          buffer: timeBuffer
+        }
+      },
+      {
+        binding: 2,
+        resource: {
+          buffer: particleBuffer
+        }
+      }, {
+        binding: 3,
+        resource: {
+          buffer: viewportBuffer
+        }
+      }]
+    });
+
+    let t = 0
+    function frame() {
+      t += 1
+      timeJs.set([t], 0)
+      viewportJs.set([canvas.width, canvas.height], 0)
+      device.queue.writeBuffer(timeBuffer, 0, timeJs);
+      device.queue.writeBuffer(viewportBuffer, 0, viewportJs);
+
+      // Compute pass to update particle positions
+      const computePassEncoder = device.createCommandEncoder();
+      const computePass = computePassEncoder.beginComputePass();
+      computePass.setPipeline(computePipeline);
+      computePass.setBindGroup(0, computeBindGroup);
+
+      computePass.dispatchWorkgroups(Math.ceil(PARTICLE_COUNT / WORKGROUP_SIZE));
+      computePass.end();
+      device.queue.submit([computePassEncoder.finish()]);
+
+      // Render pass
+      const commandEncoder = device.createCommandEncoder();
+      const passEncoder = commandEncoder.beginRenderPass({
+        colorAttachments: [{
+          view: context.getCurrentTexture().createView(),
+          clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+          loadOp: 'clear',
+          storeOp: 'store',
+        }]
+      });
+      passEncoder.setPipeline(pipeline);
+      passEncoder.setBindGroup(0, renderBindGroup);
+      passEncoder.draw(PARTICLE_COUNT * 3 * N_TRIANGLES_PER_CIRCLE);
+      passEncoder.end();
+      device.queue.submit([commandEncoder.finish()]);
+
+      requestAnimationFrame(frame);
+    }
+    frame();
+  </script>
+</body>
+</html>
