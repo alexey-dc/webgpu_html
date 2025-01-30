@@ -40,7 +40,6 @@ SOFTWARE.
   <script type="module">
     
     const WORKGROUP_SIZE = 64
-    /* 200 particles per workgroup - limited by hardware power but not much else */
     const PARTICLE_COUNT = WORKGROUP_SIZE * 200;
     const N_TRIANGLES_PER_CIRCLE = 16
     const RADIUS = 6
@@ -58,7 +57,6 @@ SOFTWARE.
       format: presentationFormat,
     });
 
-    // Define compute shader for particle positions
     const computeShaderModule = device.createShaderModule({
       code: `
         struct Particle {
@@ -177,8 +175,7 @@ SOFTWARE.
       }
     });
 
-    // Create render pipeline
-    const pipeline = device.createRenderPipeline({
+        const pipeline = device.createRenderPipeline({
       layout: 'auto',
       vertex: {
         module: vertexShaderModule,
@@ -229,8 +226,7 @@ SOFTWARE.
       }]
     });
 
-    // Bind group for vertex shader
-    const renderBindGroup = device.createBindGroup({
+        const renderBindGroup = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [{
         binding: 0,

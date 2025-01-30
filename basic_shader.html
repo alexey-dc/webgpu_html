@@ -101,8 +101,7 @@ SOFTWARE.
         }
       `
     });
-    // Create render pipeline
-    const pipeline = device.createRenderPipeline({
+        const pipeline = device.createRenderPipeline({
       layout: 'auto',
       vertex: {
         module: vertexShaderModule,
@@ -124,8 +123,7 @@ SOFTWARE.
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     })
 
-    // Bind group for vertex shader
-    const renderBindGroup = device.createBindGroup({
+        const renderBindGroup = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [{
         binding: 0,

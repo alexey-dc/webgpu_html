@@ -1,0 +1,249 @@
+<!-- 
+Copyright (C) 2024-2025 Aleksei Chernikov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. 
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGL Vertex/Fragment Demo</title>
+  <style>
+    body {
+      padding: 0;
+      margin: 0px;
+      background-color: black;
+      color: white; 
+    }
+  </style>
+</head>
+<body>
+  <div style="width: 100%; height: 100%; display: flex; flex-direction: row; justify-items: center; margin-top: 1vh; margin-top: 1svh; padding-top: 0;">
+    <canvas id="webgl-canvas" style="margin:auto; width: 98vw; height: 98vh; height: 98svh; background-color: #111111;"></canvas>
+  </div>
+  <script type="module">
+    const vertex = `#version 300 es 
+    in vec4 a_position;
+    uniform highp float time;
+    uniform highp vec2 u_resolution;
+
+    void main() {
+      gl_Position = a_position;
+    }
+    `
+
+    const fragment = `#version 300 es 
+    precision highp float;
+    out vec4 outColor;
+    uniform float time;
+    uniform vec2 u_resolution;
+    void main() {
+      float x = gl_FragCoord.x;
+      float y = gl_FragCoord.y;
+
+      float xs = x/u_resolution.x + sin(y * 0.001 + x * (time * 0.001 + 0.02) + time  * 0.03);
+      float ys = y/u_resolution.y + sin(y * 0.01);
+
+      float dx = xs - 0.5;
+      float dy = ys - 0.5;
+
+      float d = sqrt(dx * dx + dy * dy);
+      float radial = sin(d * 100.0);
+
+      float r = sin(cos(time * time * 8.0  + xs * 8.0)) * 0.5;
+      float g = sin(cos(pow(time + 0.5, 1.5) * 10.0  + ys * 8.0)) * 0.5;
+      float b = time * 0.5 + radial;
+      outColor = vec4(r, g, b, 1);
+    }
+    `
+    class VfShader {
+      constructor(glContext, vertexText, fragmentText) {
+        this.gl = glContext
+        this.vertex = this.loadShader(this.gl.VERTEX_SHADER, vertexText)
+        this.fragment = this.loadShader(this.gl.FRAGMENT_SHADER, fragmentText)
+        this.program = this.createProgram()
+        this.locations = this.processAttributesAndUniforms()
+      }
+
+      getAttr(name) {
+        return this.locations.attributes[name]
+      }
+
+      getUniform(name) {
+        return this.locations.uniforms[name]
+      }
+
+      getLocation(name) {
+        return this.getAttr(name) || this.getUniform(name)
+      }
+
+      loadShader(type, source) {
+        const shader = this.gl.createShader(type)
+        this.gl.shaderSource(shader, source)
+        this.gl.compileShader(shader)
+        const message = this.gl.getShaderInfoLog(shader);
+        const success = this.gl.getShaderParameter(shader, this.gl.COMPILE_STATUS)
+        if (!success) {
+          const message = this.gl.getShaderInfoLog(shader);
+          this.gl.deleteShader(shader);
+          throw new Error("Could not load shader", message)
+        }
+        return shader;
+      }
+
+      createProgram() {
+        const program = this.gl.createProgram()
+        this.gl.attachShader(program, this.vertex)
+        this.gl.attachShader(program, this.fragment)
+        this.gl.linkProgram(program)
+        const success = this.gl.getProgramParameter(program, this.gl.LINK_STATUS)
+        if (!success) {
+          const message = this.gl.getProgramInfoLog(program);
+          this.gl.deleteProgram(program);
+          throw new Error("Could not load program", message)
+        }
+        return program;
+      }
+
+      processAttributesAndUniforms() {
+        // https://github.com/mapbox/webgl-wind/blob/master/src/util.js#L30C1-L40C1
+        const attributes = {}
+        const uniforms = {}
+        const locations = {
+          attributes,
+          uniforms
+        }
+        const program = this.program
+        const gl = this.gl
+        const numAttributes = gl.getProgramParameter(program, gl.ACTIVE_ATTRIBUTES);
+        for (let i = 0; i < numAttributes; i++) {
+            const attribute = gl.getActiveAttrib(program, i);
+            attributes[attribute.name] = gl.getAttribLocation(program, attribute.name);
+        }
+        const numUniforms = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
+        for (let i = 0; i < numUniforms; i++) {
+            const uniform = gl.getActiveUniform(program, i);
+            uniforms[uniform.name] = gl.getUniformLocation(program, uniform.name);
+        }
+        return locations
+      }
+
+      cleanup() {
+        if(this.program) {
+          this.gl.deleteProgram(this.program)
+        }
+        if(this.vertext) {
+          this.gl.deleteShader(this.vertex)
+        }
+        if(this.fragment) {
+          this.gl.deleteShader(this.fragment)
+        }
+      }
+    }
+
+    class Scene {
+      constructor(canvas) {
+        this.canvas = canvas
+        this.gl = canvas.getContext("webgl2");
+        if(!this.gl) {
+          throw new Error("WebGL not supported in your browser.")
+        }
+        
+        this.vfShader = new VfShader(this.gl, vertex, fragment)
+
+        this.positionAttributeLocation = this.gl.getAttribLocation(this.vfShader.program, "a_position");
+        this.positionBuffer = this.gl.createBuffer();
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.positionBuffer);
+
+        const positions = [
+          -1, -1,
+          -1, 1,
+          1, 1,
+          1, 1,
+          1, -1,
+          -1, -1,
+        ];
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(positions), this.gl.STATIC_DRAW);
+
+        this.timeUniformLocation = this.gl.getUniformLocation(this.vfShader.program, "time");
+      }
+
+      get program() {
+        return this.vfShader.program
+      }
+
+      update(dt, t) {
+        this.t = t
+      }
+
+      render() {
+        const canvas = this.gl.canvas
+        const gl = this.gl
+
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(this.gl.COLOR_BUFFER_BIT);
+        gl.useProgram(this.program);
+        gl.enableVertexAttribArray(this.positionAttributeLocation);
+
+        // Bind the position buffer.
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+        
+        // Tell the attribute how to get data out of positionBuffer (ARRAY_BUFFER)
+        const size = 2;          // 2 components per iteration
+        const type = gl.FLOAT;   // the data is 32bit floats
+        const normalize = false; // don't normalize the data
+        const stride = 0;        // 0 = move forward size * sizeof(type) each iteration to get the next position
+        const offset = 0;        // start at the beginning of the buffer
+        gl.vertexAttribPointer(this.positionAttributeLocation, size, type, normalize, stride, offset)
+
+        const shaderTime = (Math.sin(this.t/50) + 1)/2
+        this.gl.uniform1f(this.timeUniformLocation, shaderTime);
+        this.gl.uniform2f(this.vfShader.getLocation('u_resolution'), this.canvas.clientWidth, this.canvas.clientHeight)
+
+        const primitiveType = gl.TRIANGLES;
+        const count = 6;
+        gl.drawArrays(primitiveType, offset, count);
+      }
+
+      cleanup() {
+        this.vfShader.cleanup()
+      }
+
+    }
+
+    const canvas = document.getElementById('webgl-canvas');
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+    const scene = new Scene(canvas)
+
+    let t = 0
+    function frame() {
+      t += 1
+      scene.update(1, t)
+      scene.render()
+      requestAnimationFrame(frame);
+    }
+    frame();
+  </script>
+</body>
+</html>
+

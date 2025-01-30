@@ -30,7 +30,7 @@
             format: presentationFormat,
         });
 
-        // Define compute shader for particle positions
+
         const computeShaderModule = device.createShaderModule({
             code: `
                 struct Particle {
@@ -125,7 +125,6 @@
             `
         });
 
-        // Create compute pipeline
         const computePipeline = device.createComputePipeline({
             layout: 'auto',
             compute: {
@@ -134,7 +133,6 @@
             }
         });
 
-        // Create render pipeline
         const pipeline = device.createRenderPipeline({
             layout: 'auto',
             vertex: {
@@ -157,7 +155,7 @@
           size: Float32Array.BYTES_PER_ELEMENT,
           usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         })
-        // Storage for particle data
+
         const particleCount = 400000;
         const particleBufferSize = Float32Array.BYTES_PER_ELEMENT * 2 * particleCount;
         const particleBuffer = device.createBuffer({
@@ -165,7 +163,6 @@
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         });
 
-        // Bind group for compute shader
         const computeBindGroup = device.createBindGroup({
             layout: computePipeline.getBindGroupLayout(0),
             entries: [
@@ -184,7 +181,6 @@
             ]
         });
 
-        // Bind group for vertex shader
         const renderBindGroup = device.createBindGroup({
             layout: pipeline.getBindGroupLayout(0),
             entries: [
@@ -209,7 +205,6 @@
             timeJs.set([t], 0)
             device.queue.writeBuffer(timeBuffer, 0, timeJs);
 
-            // Compute pass to update particle positions
             const computePassEncoder = device.createCommandEncoder();
             const computePass = computePassEncoder.beginComputePass();
             computePass.setPipeline(computePipeline);
@@ -218,7 +213,6 @@
             computePass.end();
             device.queue.submit([computePassEncoder.finish()]);
 
-            // Render pass
             const commandEncoder = device.createCommandEncoder();
             const passEncoder = commandEncoder.beginRenderPass({
                 colorAttachments: [{
